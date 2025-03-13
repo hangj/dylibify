@@ -1,5 +1,6 @@
 #undef NDEBUG
 #include <cassert>
+
 #include <cstdio>
 #include <cstdlib>
 #include <dlfcn.h>
@@ -14,6 +15,7 @@
 #include <LIEF/logging.hpp>
 #include <argparse/argparse.hpp>
 #include <fmt/format.h>
+#include <fmt/ranges.h>
 #include <subprocess.hpp>
 
 namespace fs = std::filesystem;
@@ -80,18 +82,18 @@ void {:s}(void) {{
     return objc;
 }
 
-static const std::map<CPU_TYPES, std::string> arch_map{
-    {CPU_TYPES::CPU_TYPE_X86, "i386"},
-    {CPU_TYPES::CPU_TYPE_X86_64, "x86_64"},
-    {CPU_TYPES::CPU_TYPE_ARM, "armv7"},
-    {CPU_TYPES::CPU_TYPE_ARM64, "arm64"},
+static const std::map<Header::CPU_TYPE, std::string> arch_map{
+    {Header::CPU_TYPE::X86, "i386"},
+    {Header::CPU_TYPE::X86_64, "x86_64"},
+    {Header::CPU_TYPE::ARM, "armv7"},
+    {Header::CPU_TYPE::ARM64, "arm64"},
 };
 
 static std::optional<fs::path> create_thin_stub_dylib(const fs::path &fat_stub_filename,
                                                       const fs::path &out_path,
                                                       const fs::path &stub_dylib_path,
                                                       const std::set<std::string> &stub_syms,
-                                                      const CPU_TYPES cpu_type) {
+                                                      const Header::CPU_TYPE cpu_type) {
     const auto objc = create_stub_objc(stub_syms);
     const auto arch = arch_map.at(cpu_type);
 
@@ -157,7 +159,7 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
     assert(!(ios && macos));
 
     if (verbose) {
-        LIEF::logging::set_level(LIEF::logging::LOGGING_LEVEL::LOG_TRACE);
+        LIEF::logging::set_level(LIEF::logging::LEVEL::TRACE);
     }
 
     auto binaries = Parser::parse(in_path);
@@ -169,7 +171,7 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
     for (auto &binary : *binaries) {
         std::map<std::string, const DylibCommand *> orig_libraries;
         for (const auto &dylib_cmd : binary.libraries()) {
-            if (dylib_cmd.command() == LOAD_COMMAND_TYPES::LC_ID_DYLIB) {
+            if (dylib_cmd.command() == LoadCommand::TYPE::ID_DYLIB) {
                 continue;
             }
             orig_libraries.emplace(std::make_pair(dylib_cmd.name(), &dylib_cmd));
@@ -178,7 +180,7 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
         std::map<std::string, int32_t> orig_ordinal_map;
         int32_t orig_ordinal_idx{1};
         for (const auto &dylib_cmd : binary.libraries()) {
-            if (dylib_cmd.command() == LOAD_COMMAND_TYPES::LC_ID_DYLIB) {
+            if (dylib_cmd.command() == LoadCommand::TYPE::ID_DYLIB) {
                 continue;
             }
             orig_ordinal_map.emplace(std::make_pair(dylib_cmd.name(), orig_ordinal_idx));
@@ -194,15 +196,15 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
         }
 
         auto &hdr = binary.header();
-        assert(hdr.file_type() == FILE_TYPES::MH_EXECUTE);
+        assert(hdr.file_type() == Header::FILE_TYPE::EXECUTE);
         if (verbose) {
             fmt::print("[-] Changing Mach-O type from executable to dylib\n");
         }
-        hdr.file_type(FILE_TYPES::MH_DYLIB);
+        hdr.file_type(Header::FILE_TYPE::DYLIB);
         if (verbose) {
             fmt::print("[-] Adding NO_REXPORTED_LIBS flag\n");
         }
-        hdr.flags(hdr.flags() | (uint32_t)HEADER_FLAGS::MH_NO_REEXPORTED_DYLIBS);
+        hdr.flags(hdr.flags() | (uint32_t)Header::FLAGS::NO_REEXPORTED_DYLIBS);
 
         if (binary.code_signature()) {
             if (verbose) {
@@ -304,7 +306,8 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
         std::set<std::string> remove_dylib_set;
         for (const auto &dylib : remove_dylibs) {
             if (!orig_libraries.contains(dylib)) {
-                fmt::print("[!] Asked to remove dylib '{:s}' but it wasn't found in the imports\n");
+                fmt::print("[!] Asked to remove dylib '{:s}' but it wasn't found in the imports\n",
+                           dylib);
                 return false;
             }
             remove_dylib_set.emplace(dylib);
@@ -355,7 +358,7 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
         std::map<std::string, int32_t> new_ordinal_map;
         int32_t new_ordinal_idx{1};
         for (const auto &dylib_cmd : binary.libraries()) {
-            if (dylib_cmd.command() == LOAD_COMMAND_TYPES::LC_ID_DYLIB) {
+            if (dylib_cmd.command() == LoadCommand::TYPE::ID_DYLIB) {
                 continue;
             }
             new_ordinal_map.emplace(std::make_pair(dylib_cmd.name(), new_ordinal_idx));
@@ -388,13 +391,13 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
             fmt::print("[-] Updating library ordinals in symtab\n");
         }
         for (auto &sym : binary.symbols()) {
-            if (sym.origin() != SYMBOL_ORIGINS::SYM_ORIGIN_LC_SYMTAB) {
+            if (sym.origin() != Symbol::ORIGIN::LC_SYMTAB) {
                 continue;
             }
             const auto orig_ord = get_library_ordinal(sym.description());
-            if (orig_ord == (uint8_t)SYMBOL_DESCRIPTIONS::SELF_LIBRARY_ORDINAL ||
-                orig_ord == (uint8_t)SYMBOL_DESCRIPTIONS::DYNAMIC_LOOKUP_ORDINAL ||
-                orig_ord == (uint8_t)SYMBOL_DESCRIPTIONS::EXECUTABLE_ORDINAL) {
+            if (orig_ord == (uint8_t)Symbol::SELF_LIBRARY_ORD ||
+                orig_ord == (uint8_t)Symbol::DYNAMIC_LOOKUP_ORD ||
+                orig_ord == (uint8_t)Symbol::MAIN_EXECUTABLE_ORD) {
                 continue;
             }
             const auto new_ord = orig_to_new_ordinal_map.at(orig_ord);
