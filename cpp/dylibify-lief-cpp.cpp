@@ -1,3 +1,4 @@
+#include "LIEF/MachO/Header.hpp"
 #undef NDEBUG
 #include <cassert>
 
@@ -155,7 +156,8 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
                      const std::optional<std::string> dylib_path,
                      const std::vector<std::string> remove_dylibs,
                      const bool auto_remove_dylibs = false, const bool remove_info_plist = false,
-                     const bool ios = false, const bool macos = false, const bool verbose = false) {
+                     const bool ios = false, const bool macos = false,
+                     const bool create_entry_point = false, const bool verbose = false) {
     assert(!(ios && macos));
 
     if (verbose) {
@@ -169,30 +171,40 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
     std::vector<fs::path> thin_stubs;
 
     for (auto &binary : *binaries) {
+        const auto is_dyldlink = binary.header().has(Header::FLAGS::DYLDLINK);
+        if (verbose) {
+            fmt::print("[-] Input Mach-O has MH_DYLDLINK?: {:s}\n", is_dyldlink ? "yes" : "no");
+        }
         std::map<std::string, const DylibCommand *> orig_libraries;
-        for (const auto &dylib_cmd : binary.libraries()) {
-            if (dylib_cmd.command() == LoadCommand::TYPE::ID_DYLIB) {
-                continue;
+        if (is_dyldlink) {
+            for (const auto &dylib_cmd : binary.libraries()) {
+                if (dylib_cmd.command() == LoadCommand::TYPE::ID_DYLIB) {
+                    continue;
+                }
+                orig_libraries.emplace(std::make_pair(dylib_cmd.name(), &dylib_cmd));
             }
-            orig_libraries.emplace(std::make_pair(dylib_cmd.name(), &dylib_cmd));
         }
 
         std::map<std::string, int32_t> orig_ordinal_map;
         int32_t orig_ordinal_idx{1};
-        for (const auto &dylib_cmd : binary.libraries()) {
-            if (dylib_cmd.command() == LoadCommand::TYPE::ID_DYLIB) {
-                continue;
+        if (is_dyldlink) {
+            for (const auto &dylib_cmd : binary.libraries()) {
+                if (dylib_cmd.command() == LoadCommand::TYPE::ID_DYLIB) {
+                    continue;
+                }
+                orig_ordinal_map.emplace(std::make_pair(dylib_cmd.name(), orig_ordinal_idx));
+                ++orig_ordinal_idx;
             }
-            orig_ordinal_map.emplace(std::make_pair(dylib_cmd.name(), orig_ordinal_idx));
-            ++orig_ordinal_idx;
         }
 
         std::map<std::string, std::string> orig_syms_to_libs;
-        for (auto &sym : binary.symbols()) {
-            if (!sym.has_binding_info() || !sym.binding_info()->has_library()) {
-                continue;
+        if (is_dyldlink) {
+            for (auto &sym : binary.symbols()) {
+                if (!sym.has_binding_info() || !sym.binding_info()->has_library()) {
+                    continue;
+                }
+                orig_syms_to_libs.emplace(sym.name(), sym.binding_info()->library()->name());
             }
-            orig_syms_to_libs.emplace(sym.name(), sym.binding_info()->library()->name());
         }
 
         auto &hdr = binary.header();
@@ -202,9 +214,37 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
         }
         hdr.file_type(Header::FILE_TYPE::DYLIB);
         if (verbose) {
-            fmt::print("[-] Adding NO_REXPORTED_LIBS flag\n");
+            fmt::print("[-] Adding NO_REXPORTED_DYLIBS flag\n");
         }
         hdr.flags(hdr.flags() | (uint32_t)Header::FLAGS::NO_REEXPORTED_DYLIBS);
+
+        if (!is_dyldlink) {
+            if (verbose) {
+                fmt::print("[-] Adding DYLDLINK flag\n");
+            }
+            hdr.flags(hdr.flags() | (uint32_t)Header::FLAGS::DYLDLINK);
+        }
+
+        if (!binary.header().has(Header::FLAGS::TWOLEVEL)) {
+            if (verbose) {
+                fmt::print("[-] Adding TWOLEVEL flag\n");
+            }
+            hdr.flags(hdr.flags() | (uint32_t)Header::FLAGS::TWOLEVEL);
+        }
+
+        if (!binary.header().has(Header::FLAGS::NOUNDEFS)) {
+            if (verbose) {
+                fmt::print("[-] Adding NOUNDEFS flag\n");
+            }
+            hdr.flags(hdr.flags() | (uint32_t)Header::FLAGS::NOUNDEFS);
+        }
+
+        if (binary.header().has(Header::FLAGS::PIE)) {
+            if (verbose) {
+                fmt::print("[-] Removing PIE flag\n");
+            }
+            hdr.flags(hdr.flags() & ~(uint32_t)Header::FLAGS::PIE);
+        }
 
         if (binary.code_signature()) {
             if (verbose) {
@@ -256,11 +296,33 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
             binary.remove(*main_cmd);
         }
 
-        if (const auto *src_cmd = binary.source_version()) {
-            if (verbose) {
-                fmt::print("[-] Remvoing source version command\n");
+        std::optional<uint64_t> entry_point;
+        if (create_entry_point) {
+            if (!binary.has_thread_command()) {
+                fmt::print("[!] binary doesn't have UNIXTHREADS\n");
+                return 1;
             }
-            binary.remove(*src_cmd);
+            const auto &thread_cmd = *binary.thread_command();
+            entry_point            = thread_cmd.pc();
+            if (verbose) {
+                fmt::print("[-] UNIXTHREADS entry point is: {:#0x}\n", *entry_point);
+            }
+        }
+
+        if (const auto *thread_cmd = binary.thread_command()) {
+            if (verbose) {
+                fmt::print("[-] Removing UNIXTHREADS command\n");
+            }
+            binary.remove(*thread_cmd);
+        }
+
+        if (false) {
+            if (const auto *src_cmd = binary.source_version()) {
+                if (verbose) {
+                    fmt::print("[-] Remvoing source version command\n");
+                }
+                binary.remove(*src_cmd);
+            }
         }
 
         if (ios || macos) {
@@ -379,31 +441,40 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
             }
         }
 
-        if (verbose) {
-            fmt::print("[-] Updating library ordinals in binding info\n");
-        }
-        for (auto &binding_info : binary.dyld_info()->bindings()) {
-            binding_info.library_ordinal(
-                orig_to_new_ordinal_map.at(binding_info.library_ordinal()));
+        if (is_dyldlink) {
+            if (verbose) {
+                fmt::print("[-] Updating library ordinals in binding info\n");
+            }
+            for (auto &binding_info : binary.dyld_info()->bindings()) {
+                binding_info.library_ordinal(
+                    orig_to_new_ordinal_map.at(binding_info.library_ordinal()));
+            }
+
+            if (verbose) {
+                fmt::print("[-] Updating library ordinals in symtab\n");
+            }
+            for (auto &sym : binary.symbols()) {
+                if (sym.origin() != Symbol::ORIGIN::LC_SYMTAB) {
+                    continue;
+                }
+                const auto orig_ord = get_library_ordinal(sym.description());
+                if (orig_ord == (uint8_t)Symbol::SELF_LIBRARY_ORD ||
+                    orig_ord == (uint8_t)Symbol::DYNAMIC_LOOKUP_ORD ||
+                    orig_ord == (uint8_t)Symbol::MAIN_EXECUTABLE_ORD) {
+                    continue;
+                }
+                const auto new_ord = orig_to_new_ordinal_map.at(orig_ord);
+                auto new_desc      = sym.description();
+                set_library_ordinal(new_desc, new_ord);
+                sym.description(new_desc);
+            }
         }
 
-        if (verbose) {
-            fmt::print("[-] Updating library ordinals in symtab\n");
-        }
-        for (auto &sym : binary.symbols()) {
-            if (sym.origin() != Symbol::ORIGIN::LC_SYMTAB) {
-                continue;
+        if (entry_point.has_value()) {
+            if (verbose) {
+                fmt::print("[-] Adding dylbify_entry symbol\n");
             }
-            const auto orig_ord = get_library_ordinal(sym.description());
-            if (orig_ord == (uint8_t)Symbol::SELF_LIBRARY_ORD ||
-                orig_ord == (uint8_t)Symbol::DYNAMIC_LOOKUP_ORD ||
-                orig_ord == (uint8_t)Symbol::MAIN_EXECUTABLE_ORD) {
-                continue;
-            }
-            const auto new_ord = orig_to_new_ordinal_map.at(orig_ord);
-            auto new_desc      = sym.description();
-            set_library_ordinal(new_desc, new_ord);
-            sym.description(new_desc);
+            binary.add_exported_function(*entry_point, "dylibify_entry");
         }
 
         if (remove_sym_set.size()) {
@@ -462,6 +533,10 @@ int main(int argc, const char **argv) {
         .default_value(false)
         .implicit_value(true)
         .help("patch platform to macOS");
+    parser.add_argument("-E", "--entry-point")
+        .default_value(false)
+        .implicit_value(true)
+        .help("make an entry point symbol with UNIXTHREAD PC");
     parser.add_argument("-V", "--verbose")
         .default_value(false)
         .implicit_value(true)
@@ -478,7 +553,8 @@ int main(int argc, const char **argv) {
         parser.get<std::string>("--in"), parser.get<std::string>("--out"),
         parser.present("--dylib-path"), parser.get<std::vector<std::string>>("--remove-dylib"),
         parser.get<bool>("--auto-remove-dylibs"), parser.get<bool>("--remove-info-plist"),
-        parser.get<bool>("--ios"), parser.get<bool>("--macos"), parser.get<bool>("--verbose"));
+        parser.get<bool>("--ios"), parser.get<bool>("--macos"), parser.get<bool>("--entry-point"),
+        parser.get<bool>("--verbose"));
 
     return res ? 0 : 1;
 }
