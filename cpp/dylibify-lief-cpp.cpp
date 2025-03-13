@@ -1,3 +1,5 @@
+#include "LIEF/MachO/DylibCommand.hpp"
+#include "LIEF/MachO/ExportInfo.hpp"
 #include "LIEF/MachO/Header.hpp"
 #undef NDEBUG
 #include <cassert>
@@ -265,7 +267,7 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
             new_dylib_path = *dylib_path;
         } else {
             fs::path dylib_path{out_path};
-            new_dylib_path = fs::path{"@executable_path"} / dylib_path.filename();
+            new_dylib_path = fs::path{"@rpath"} / dylib_path.filename();
         }
         if (verbose) {
             fmt::print("[-] Setting ID_DYLIB path to: '{:s}'\n", new_dylib_path.string());
@@ -314,6 +316,25 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
                 fmt::print("[-] Removing UNIXTHREADS command\n");
             }
             binary.remove(*thread_cmd);
+        }
+
+        bool loads_libsystem = false;
+        for (const auto &dylib_cmd : binary.libraries()) {
+            if (dylib_cmd.command() != LoadCommand::TYPE::LOAD_DYLIB) {
+                continue;
+            }
+            if (dylib_cmd.name() == "/usr/lib/libSystem.B.dylib") {
+                loads_libsystem = true;
+                break;
+            }
+        }
+        if (!loads_libsystem) {
+            if (verbose) {
+                fmt::print("[-] Adding LC_LOAD_DYLIB for /usr/lib/libSystem.B.dylib\n");
+            }
+            binary.add(DylibCommand::load_dylib("/usr/lib/libSystem.B.dylib", 2,
+                                                DylibCommand::version2int({1, 0, 0}),
+                                                DylibCommand::version2int({1, 0, 0})));
         }
 
         if (false) {
@@ -474,7 +495,13 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
             if (verbose) {
                 fmt::print("[-] Adding dylbify_entry symbol\n");
             }
-            binary.add_exported_function(*entry_point, "dylibify_entry");
+            binary.add_exported_function(*entry_point, "_dylibify_entry");
+            auto entry_sym = binary.get_symbol("_dylibify_entry");
+            assert(entry_sym);
+            entry_sym->raw_type((uint8_t)Symbol::TYPE::SECTION |
+                                (uint8_t)Symbol::ORIGIN::LC_SYMTAB);
+            entry_sym->numberof_sections(1);
+            // entry_exp_info->flags(ExportInfo::FLAGS::)
         }
 
         if (remove_sym_set.size()) {
@@ -513,7 +540,7 @@ int main(int argc, const char **argv) {
     parser.add_argument("-i", "--in").required().help("input Mach-O executable");
     parser.add_argument("-o", "--out").required().help("output Mach-O dylib");
     parser.add_argument("-d", "--dylib-path")
-        .help("path for LC_ID_DYLIB command. e.g. @executable_path/Frameworks/libfoo.dylib");
+        .help("path for LC_ID_DYLIB command. e.g. @rpath/Frameworks/libfoo.dylib");
     parser.add_argument("-r", "--remove-dylib")
         .nargs(argparse::nargs_pattern::any)
         .help("remove dylib dependency");
