@@ -1,14 +1,13 @@
-#include "LIEF/MachO/DylibCommand.hpp"
-#include "LIEF/MachO/LoadCommand.hpp"
-#include <memory>
 #undef NDEBUG
 #include <cassert>
 
+// #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <dlfcn.h>
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -497,11 +496,32 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
             if (verbose) {
                 fmt::print("[-] Adding dylbify_entry symbol\n");
             }
+
+            auto dyld_chained_lc = binary.dyld_chained_fixups();
+            fmt::print("[-] binary.dyld_chained_fixups() 0: {}\n", fmt::ptr(dyld_chained_lc));
+            if (!dyld_chained_lc) {
+                auto tmp = std::make_unique<DyldChainedFixups>();
+                tmp->command(LoadCommand::TYPE::DYLD_CHAINED_FIXUPS);
+                tmp->size(16);
+                dyld_chained_lc = binary.add(std::move(tmp))->cast<DyldChainedFixups>();
+                fmt::print("[-] dyld_chained_lc 1: {}\n", fmt::ptr(dyld_chained_lc));
+                dyld_chained_lc = binary.dyld_chained_fixups();
+                fmt::print("[-] binary.dyld_chained_fixups() 2: {}\n", fmt::ptr(dyld_chained_lc));
+                for (auto &seg : binary.segments()) {
+                    auto fu =
+                        DyldChainedFixups::chained_starts_in_segment::create_empty_chained(seg);
+                    dyld_chained_lc->add(fu);
+                }
+                fmt::print("[-] binary.dyld_chained_fixups() 3: {}\n",
+                           fmt::streamed(*dyld_chained_lc));
+            }
+
             fmt::print("[-] binary.dyld_exports_trie() 0: {}\n",
                        fmt::ptr(binary.dyld_exports_trie()));
             LoadCommand *dyld_exp_trie_lc = nullptr;
             auto trie                     = new DyldExportsTrie();
             trie->command(LoadCommand::TYPE::DYLD_EXPORTS_TRIE);
+            trie->size(16);
             fmt::print("[-] trie: {}\n", fmt::ptr(trie));
             fmt::print("[-] trie.show_export_trie() before\n");
             fmt::print("[-] trie.show_export_trie(): '{:s}'\n", trie->show_export_trie());
