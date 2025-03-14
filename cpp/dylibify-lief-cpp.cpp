@@ -1,3 +1,6 @@
+#include "LIEF/MachO/DylibCommand.hpp"
+#include "LIEF/MachO/LoadCommand.hpp"
+#include <memory>
 #undef NDEBUG
 #include <cassert>
 
@@ -160,6 +163,7 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
                      const bool create_entry_point = false, const bool verbose = false) {
     assert(!(ios && macos));
 
+    LIEF::logging::enable();
     if (verbose) {
         LIEF::logging::set_level(LIEF::logging::LEVEL::TRACE);
     }
@@ -493,17 +497,26 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
             if (verbose) {
                 fmt::print("[-] Adding dylbify_entry symbol\n");
             }
+            fmt::print("[-] binary.dyld_exports_trie() 0: {}\n",
+                       fmt::ptr(binary.dyld_exports_trie()));
             LoadCommand *dyld_exp_trie_lc = nullptr;
-            DyldExportsTrie trie{};
+            auto trie                     = new DyldExportsTrie();
+            trie->command(LoadCommand::TYPE::DYLD_EXPORTS_TRIE);
+            fmt::print("[-] trie: {}\n", fmt::ptr(trie));
             fmt::print("[-] trie.show_export_trie() before\n");
-            fmt::print("[-] trie.show_export_trie(): '{:s}'\n", trie.show_export_trie());
+            fmt::print("[-] trie.show_export_trie(): '{:s}'\n", trie->show_export_trie());
             fmt::print("[-] trie.show_export_trie() after\n");
-            fmt::print("[-] trie: fmt::streamed {}\n", fmt::streamed(trie));
-            fmt::print("[-] trie: fmt::streamed end\n", fmt::streamed(trie));
+            fmt::print("[-] trie: fmt::streamed {}\n", fmt::streamed(*trie));
+            fmt::print("[-] trie: fmt::streamed end\n", fmt::streamed(*trie));
             if (!binary.dyld_exports_trie() && !binary.dyld_info()) {
-                dyld_exp_trie_lc = binary.add(trie);
+                dyld_exp_trie_lc = binary.add(std::move(std::unique_ptr<LoadCommand>(trie)));
             }
+            fmt::print("[-] dyld_exp_trie_lc: {}\n", fmt::ptr(dyld_exp_trie_lc));
+            fmt::print("[-] *dyld_exp_trie_lc: {}\n", fmt::streamed(*dyld_exp_trie_lc));
             DyldExportsTrie *dyld_exp_trie = dyld_exp_trie_lc->cast<DyldExportsTrie>();
+            fmt::print("[-] dyld_exp_trie: {}\n", fmt::ptr(dyld_exp_trie));
+            fmt::print("[-] binary.dyld_exports_trie() 1: {}\n",
+                       fmt::ptr(binary.dyld_exports_trie()));
             auto *entry_exp_info = binary.add_exported_function(*entry_point, "_dylibify_entry");
             auto entry_sym       = binary.get_symbol("_dylibify_entry");
             assert(entry_sym);
@@ -511,9 +524,7 @@ static bool dylibify(const std::string &in_path, const std::string &out_path,
                                 (uint8_t)Symbol::ORIGIN::LC_SYMTAB);
             entry_sym->numberof_sections(1);
             fmt::print("[-] entry_exp_info: {}\n", fmt::ptr(entry_exp_info));
-            fmt::print("[-] dyld_exp_trie: {}\n", fmt::ptr(dyld_exp_trie));
-            fmt::print("[-] dyld_exp_trie_lc: {}\n", fmt::ptr(dyld_exp_trie_lc));
-            fmt::print("[-] binary.dyld_exports_trie(): {}\n",
+            fmt::print("[-] binary.dyld_exports_trie() 2: {}\n",
                        fmt::ptr(binary.dyld_exports_trie()));
             fmt::print("[-] binary.dyld_info(): {}\n", fmt::ptr(binary.dyld_info()));
             // assert(entry_exp_info);
