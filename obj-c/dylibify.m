@@ -147,9 +147,7 @@ void patch_pagezero(FILE *obj_file, off_t offset, struct load_command *cmd, BOOL
 
     //----If it's a FAT binary do not copy it twice----//
     if (!copied) {
-        strcpy((char *)dylib_cmd + sizeof(struct dylib_command),
-               ([[NSString stringWithFormat:@"@executable_path/Frameworks/%@",
-                                            [@(target) lastPathComponent]] UTF8String]));
+        strcpy((char *)dylib_cmd + sizeof(struct dylib_command), target);
     }
 
     printf("\t\t[*] Doing the magic\n");
@@ -427,7 +425,7 @@ int dylibify(NSDictionary *args) {
                 // command----//
                 if (!strcmp(seg64->segname, "__PAGEZERO")) {
                     patch_pagezero(file, offset, cmd, copied, seg64,
-                                   sizeof(struct segment_command_64), [args[@"out"] UTF8String]);
+                                   sizeof(struct segment_command_64), [args[@"id"] UTF8String]);
                 }
                 free(seg64);
             } else if (cmd->cmd == LC_DYLD_INFO_ONLY) {
@@ -481,7 +479,7 @@ int dylibify(NSDictionary *args) {
 
                 if (!strcmp(seg->segname, "__PAGEZERO")) {
                     patch_pagezero(file, offset, cmd, copied, seg, sizeof(struct segment_command),
-                                   [args[@"out"] UTF8String]);
+                                   [args[@"id"] UTF8String]);
                 }
 
                 free(seg);
@@ -505,12 +503,14 @@ int dylibify(NSDictionary *args) {
 
         size_t arch_offset     = sizeof(struct fat_header);
         struct fat_header *fat = load_bytes(file, offset, sizeof(struct fat_header));
-        struct fat_arch *arch  = load_bytes(file, arch_offset, sizeof(struct fat_arch));
+        // struct fat_arch *arch  = load_bytes(file, arch_offset, sizeof(struct fat_arch));
         int n                  = SWAP32(fat->nfat_arch);
 
         printf("[i] %d ARCHS\n", n);
 
-        while (n-- > 0) {
+        for (int i=0; i < n; i++) {
+            copied = false;
+            struct fat_arch *arch  = load_bytes(file, arch_offset + i * sizeof(struct fat_arch), sizeof(struct fat_arch));
             offset = SWAP32(arch->offset);
             magic  = load_bytes(file, offset, sizeof(uint32_t));
 
@@ -537,7 +537,7 @@ int dylibify(NSDictionary *args) {
                         if (!strcmp(seg64->segname, "__PAGEZERO")) {
                             patch_pagezero(file, offset, cmd, copied, seg64,
                                            sizeof(struct segment_command_64),
-                                           [args[@"out"] UTF8String]);
+                                           [args[@"id"] UTF8String]);
                             copied = true;
                         }
                         free(seg64);
@@ -551,7 +551,8 @@ int dylibify(NSDictionary *args) {
                         printf("[*] found BUILD_VERSION!\n");
                         struct build_version_command *buildver =
                             load_bytes(file, offset, sizeof(struct build_version_command));
-                        patch_buildver(file, SWAP32(arch->offset), buildver);
+                        // patch_buildver(file, SWAP32(arch->offset), buildver);
+                        patch_buildver(file, offset, buildver);
                         free(buildver);
                     } else if (cmd->cmd == LC_VERSION_MIN_IPHONEOS) {
                         printf("[*] found VERSION_MIN_IPHONEOS!\n");
@@ -585,7 +586,7 @@ int dylibify(NSDictionary *args) {
                         if (!strcmp(seg->segname, "__PAGEZERO")) {
                             patch_pagezero(file, offset, cmd, copied, seg,
                                            sizeof(struct segment_command),
-                                           [args[@"out"] UTF8String]);
+                                           [args[@"id"] UTF8String]);
                             copied = true;
                         }
                         free(seg);
@@ -605,12 +606,11 @@ int dylibify(NSDictionary *args) {
                 printf("[!] Unrecognized architecture with MAGIC = 0x%x\n", *magic);
                 continue;
             }
-            arch_offset += sizeof(struct fat_arch);
-            arch = load_bytes(file, arch_offset, sizeof(struct fat_arch));
+
+            free(arch);
         }
 
         free(fat);
-        free(arch);
     } else {
         printf("[!] Unrecognized file\n");
         goto err;
@@ -622,14 +622,20 @@ err:
 }
 
 int main(int argc, const char **argv) {
-    NSDictionary *args =
-        [[NSUserDefaults standardUserDefaults] volatileDomainForName:NSArgumentDomain];
+    NSMutableDictionary *args =
+        [[[NSUserDefaults standardUserDefaults] volatileDomainForName:NSArgumentDomain] mutableCopy];
     NSLog(@"args: %@", args);
     if (!args[@"in"] || !args[@"out"]) {
-        printf("Usage:\n\t%s -in <in> -out <out>\nExample:\n\t%s -in /usr/bin/executable -out "
+        printf("Usage:\n\t%s -in <in> [-id <id>] -out <out>\nExample:\n\t%s -in /usr/bin/executable -out "
                "/usr/lib/dylibified.dylib\n",
                argv[0], argv[0]);
         return -1;
+    }
+
+    if (!args[@"id"]) {
+        // args[@"id"] = [NSString stringWithFormat:@"@executable_path/Frameworks/%@", [args[@"out"] lastPathComponent]];
+        args[@"id"] = [args[@"out"] lastPathComponent];
+        NSLog(@"args: %@", args);
     }
 
     dylibify(args);
